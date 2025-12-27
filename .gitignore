@@ -1,0 +1,159 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+data/                    # Исходные данные (не коммитить)
+checkpoints/             # Веса моделей (большие файлы)
+logs/                    # Логи TensorBoard
+visualizations/         # Визуализации результатов
+results/                # Результаты обработки
+*.pth                   # Файлы весов PyTorch
+*.pt
+*.onnx                  # ONNX модели
+*.h5                    # Keras модели
+*.pkl                   # Pickle файлы
+*.joblib
+
+# Модели и датасеты (большие файлы)
+pretrained/
+models/pretrained/
+*.tar.gz
+*.zip
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# TensorBoard
+events.*
+*.tfevents.*
+
+# Операционные системы
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+ehthumbs.db
+[Tt]humbs.db
+
+# Временные файлы
+*.tmp
+*.temp
+*.bak
+*.save
+
+# Логи
+*.log
+logs/
+*.pid
+
+# Конфигурационные файлы с чувствительными данными
+config.json
+secrets.json
+*.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Тестовые данные
+test_outputs/
+test_results/
+
+# Cache
+.cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+.coverage.*
+
+# Profiling
+prof/
+*.prof
+*.lprof
+
+# Documentation
+docs/_build/
+_build/
+
+# Примеры и тестовые изображения
+examples/output/
+samples/
+
+# Базы данных
+*.db
+*.sqlite
+*.sqlite3
+
+# Архивы
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Файлы специфичные для проекта
+dataset_info.json
+training_history.json
+
+# Настройки специфичные для разработчика
+local_settings.py
+.devcontainer/
+.venv/
+
+# Файлы кэша ML
+.cache/
+.cache_huggingface/
+.cache_torch/
