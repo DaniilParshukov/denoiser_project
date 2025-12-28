@@ -1,278 +1,297 @@
-import os
+import torch
+from torch.utils.data import Dataset
 import cv2
 import numpy as np
-import torch
-from torch.utils.data import Dataset, DataLoader
+import os
+from pathlib import Path
 import random
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
+import glob
+from PIL import Image
 
 
 class DenoiseMaskDataset(Dataset):
     """
-    Датасет для обучения модели денойзинга с масками
-    Требует три типа данных:
-    1. Noisy - зашумленное изображение
-    2. Clean - чистое изображение (цель для денойзинга)
-    3. Mask - бинарная маска (цель для векторизации)
+    Dataset для денойзинга с масками
     """
-    
-    def __init__(self, data_dir, mode='train', patch_size=128, synthetic_masks=True):
+    def __init__(self, data_dir, mode='train', patch_size=128, 
+                 synthetic_masks=False, transform=None):
         """
         Args:
             data_dir: корневая директория с данными
             mode: 'train' или 'test'
             patch_size: размер патча для обучения
-            synthetic_masks: генерировать маски синтетически если нет реальных
+            synthetic_masks: генерировать маски синтетически если нет настоящих
+            transform: трансформации для аугментации
         """
+        self.data_dir = Path(data_dir) / mode
         self.mode = mode
         self.patch_size = patch_size
         self.synthetic_masks = synthetic_masks
+        self.transform = transform
         
-        # Пути к данным
-        self.noisy_dir = os.path.join(data_dir, mode, 'noisy')
-        self.clean_dir = os.path.join(data_dir, mode, 'clean')
-        self.mask_dir = os.path.join(data_dir, mode, 'mask') if os.path.exists(os.path.join(data_dir, mode, 'mask')) else None
+        # Проверяем существование директорий
+        self.clean_dir = self.data_dir / 'clean'
+        self.noisy_dir = self.data_dir / 'noisy'
+        self.mask_dir = self.data_dir / 'mask'
         
-        # Получаем список файлов
-        self.noisy_files = sorted([f for f in os.listdir(self.noisy_dir) 
-                                  if f.endswith(('.png', '.jpg', '.bmp', '.tiff'))])
+        if not self.clean_dir.exists():
+            raise FileNotFoundError(f"Clean directory not found: {self.clean_dir}")
         
-        print(f"Found {len(self.noisy_files)} images in {mode} set")
+        # Собираем список файлов
+        self.clean_files = sorted(glob.glob(str(self.clean_dir / '*.png')) +
+                                  glob.glob(str(self.clean_dir / '*.jpg')) +
+                                  glob.glob(str(self.clean_dir / '*.bmp')))
         
-        # Аугментации для обучения
-        if mode == 'train':
-            self.transform = A.Compose([
-                A.RandomCrop(height=patch_size, width=patch_size, p=1.0),
-                A.HorizontalFlip(p=0.5),
-                A.VerticalFlip(p=0.5),
-                A.RandomRotate90(p=0.5),
-                A.Normalize(mean=[0.5], std=[0.5]),
-                ToTensorV2(),
-            ])
+        print(f"Found {len(self.clean_files)} clean images in {self.clean_dir}")
+        
+        # Проверяем наличие noisy и mask файлов
+        self.has_noisy = self.noisy_dir.exists()
+        self.has_mask = self.mask_dir.exists()
+        
+        if self.has_noisy:
+            print(f"Using noisy images from {self.noisy_dir}")
         else:
-            self.transform = A.Compose([
-                A.Normalize(mean=[0.5], std=[0.5]),
-                ToTensorV2(),
-            ])
+            print("No noisy directory found. Will use clean images as noisy (for testing).")
+        
+        if self.has_mask:
+            print(f"Using masks from {self.mask_dir}")
+        elif synthetic_masks:
+            print("No mask directory found. Will generate synthetic masks.")
+        else:
+            print("No mask directory found and synthetic_masks=False. Using empty masks.")
     
     def __len__(self):
-        return len(self.noisy_files)
+        return len(self.clean_files)
     
-    def generate_mask_from_clean(self, clean_img):
-        """
-        Генерация маски из чистого изображения
-        Используется если нет реальных масок
-        """
-        # Бинаризация с адаптивным порогом
-        if len(clean_img.shape) == 3:
-            clean_gray = cv2.cvtColor(clean_img, cv2.COLOR_BGR2GRAY)
+    def __getitem__(self, idx):
+        # Загрузка чистого изображения
+        clean_path = self.clean_files[idx]
+        clean_img = self.load_image(clean_path)
+        
+        # Получаем базовое имя файла
+        filename = Path(clean_path).stem
+        
+        # Загрузка или создание зашумленного изображения
+        if self.has_noisy:
+            noisy_path = self.noisy_dir / (filename + Path(clean_path).suffix)
+            if noisy_path.exists():
+                noisy_img = self.load_image(str(noisy_path))
+            else:
+                # Если файл не найден, используем чистое изображение
+                noisy_img = clean_img.copy()
+                # Добавляем небольшой шум для разнообразия
+                if self.mode == 'train':
+                    noise = np.random.normal(0, 5, clean_img.shape).astype(np.float32)
+                    noisy_img = np.clip(noisy_img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
         else:
-            clean_gray = clean_img
+            noisy_img = clean_img.copy()
         
-        # Адаптивный порог для получения маски
-        mask = cv2.adaptiveThreshold(
-            clean_gray, 255, 
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 11, 2
-        )
+        # Загрузка или создание маски
+        if self.has_mask:
+            mask_path = self.mask_dir / (filename + Path(clean_path).suffix)
+            if mask_path.exists():
+                mask_img = self.load_image(str(mask_path), is_mask=True)
+            elif self.synthetic_masks:
+                mask_img = self.generate_synthetic_mask(clean_img)
+            else:
+                mask_img = np.zeros_like(clean_img, dtype=np.uint8)
+        elif self.synthetic_masks:
+            mask_img = self.generate_synthetic_mask(clean_img)
+        else:
+            mask_img = np.zeros_like(clean_img, dtype=np.uint8)
         
-        # Морфологические операции для очистки
+        # Обрезка или паддинг до patch_size если нужно
+        if self.patch_size > 0 and self.mode == 'train':
+            clean_img, noisy_img, mask_img = self.random_crop(
+                clean_img, noisy_img, mask_img, self.patch_size
+            )
+        
+        # Конвертация в тензоры и нормализация
+        clean_tensor = self.image_to_tensor(clean_img)
+        noisy_tensor = self.image_to_tensor(noisy_img)
+        mask_tensor = self.mask_to_tensor(mask_img)
+        
+        return {
+            'clean': clean_tensor,
+            'noisy': noisy_tensor,
+            'mask': mask_tensor,
+            'filename': filename
+        }
+    
+    def load_image(self, path, is_mask=False):
+        """Загрузка изображения"""
+        try:
+            # Пробуем разные методы загрузки
+            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                # Пробуем через PIL
+                img = np.array(Image.open(path).convert('L'))
+            
+            if img is None:
+                raise ValueError(f"Cannot load image: {path}")
+            
+            return img
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            # Возвращаем пустое изображение в случае ошибки
+            return np.zeros((self.patch_size, self.patch_size), dtype=np.uint8)
+    
+    def generate_synthetic_mask(self, clean_img):
+        """Генерация синтетической маски на основе чистого изображения"""
+        # Простая бинаризация
+        _, mask = cv2.threshold(clean_img, 127, 255, cv2.THRESH_BINARY)
+        
+        # Морфологические операции для улучшения маски
         kernel = np.ones((3, 3), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         
-        # Нормализация к [0, 1]
-        mask = (mask > 127).astype(np.float32)
-        
         return mask
     
-    def __getitem__(self, idx):
-        # Загрузка noisy изображения
-        noisy_path = os.path.join(self.noisy_dir, self.noisy_files[idx])
-        noisy = cv2.imread(noisy_path, cv2.IMREAD_GRAYSCALE)
+    def random_crop(self, clean, noisy, mask, crop_size):
+        """Случайная обрезка изображений"""
+        h, w = clean.shape
         
-        # Загрузка clean изображения (если есть)
-        clean_path = os.path.join(self.clean_dir, self.noisy_files[idx])
-        if os.path.exists(clean_path):
-            clean = cv2.imread(clean_path, cv2.IMREAD_GRAYSCALE)
-        else:
-            # Если нет clean, создаем его из noisy (для тестов)
-            clean = noisy.copy()
-        
-        # Загрузка или генерация маски
-        if self.mask_dir and os.path.exists(os.path.join(self.mask_dir, self.noisy_files[idx])):
-            # Загружаем реальную маску
-            mask_path = os.path.join(self.mask_dir, self.noisy_files[idx])
-            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            mask = (mask > 127).astype(np.float32)
-        else:
-            # Генерируем маску из clean изображения
-            mask = self.generate_mask_from_clean(clean)
-        
-        # Преобразование к 3-канальному для albumentations
-        noisy_3ch = np.stack([noisy] * 3, axis=-1)
-        clean_3ch = np.stack([clean] * 3, axis=-1)
-        mask_3ch = np.stack([mask] * 3, axis=-1)
-        
-        # Применяем аугментации
-        if self.mode == 'train':
-            transformed = self.transform(image=noisy_3ch, 
-                                         clean=clean_3ch, 
-                                         mask=mask_3ch)
+        if h < crop_size or w < crop_size:
+            # Если изображение меньше crop_size, делаем паддинг
+            pad_h = max(0, crop_size - h)
+            pad_w = max(0, crop_size - w)
             
-            noisy_tensor = transformed['image'][0:1, :, :]  # Берем только первый канал
-            clean_tensor = transformed['clean'][0:1, :, :]
-            mask_tensor = transformed['mask'][0:1, :, :]
-        else:
-            # Для теста сохраняем оригинальный размер
-            transformed = self.transform(image=noisy_3ch)
-            noisy_tensor = transformed['image'][0:1, :, :]
+            clean = np.pad(clean, ((0, pad_h), (0, pad_w)), mode='reflect')
+            noisy = np.pad(noisy, ((0, pad_h), (0, pad_w)), mode='reflect')
+            mask = np.pad(mask, ((0, pad_h), (0, pad_w)), mode='constant')
             
-            # Clean и mask без изменения размера
-            clean_tensor = torch.FloatTensor(clean).unsqueeze(0) / 255.0
-            clean_tensor = (clean_tensor - 0.5) / 0.5  # Нормализация
-            
-            mask_tensor = torch.FloatTensor(mask).unsqueeze(0)
+            h, w = clean.shape
         
-        return {
-            'noisy': noisy_tensor,
-            'clean': clean_tensor,
-            'mask': mask_tensor,
-            'filename': self.noisy_files[idx]
-        }
+        # Случайные координаты для обрезки
+        top = random.randint(0, h - crop_size)
+        left = random.randint(0, w - crop_size)
+        
+        clean_crop = clean[top:top+crop_size, left:left+crop_size]
+        noisy_crop = noisy[top:top+crop_size, left:left+crop_size]
+        mask_crop = mask[top:top+crop_size, left:left+crop_size]
+        
+        return clean_crop, noisy_crop, mask_crop
+    
+    def image_to_tensor(self, img):
+        """Конвертация изображения в тензор с нормализацией"""
+        # Конвертация в float и нормализация в диапазон [-1, 1]
+        img_tensor = torch.from_numpy(img.astype(np.float32) / 255.0)
+        img_tensor = img_tensor * 2 - 1  # [-1, 1]
+        img_tensor = img_tensor.unsqueeze(0)  # Добавляем канальный размер
+        return img_tensor
+    
+    def mask_to_tensor(self, mask):
+        """Конвертация маски в тензор"""
+        mask_tensor = torch.from_numpy(mask.astype(np.float32) / 255.0)
+        mask_tensor = mask_tensor.unsqueeze(0)  # Добавляем канальный размер
+        return mask_tensor
 
 
 class SyntheticNoiseMaskDataset(Dataset):
     """
-    Датасет для синтетической генерации данных
-    Генерирует noisy, clean и mask на лету
+    Синтетический датасет с генерируемыми на лету данными
     """
-    
     def __init__(self, num_samples=1000, patch_size=128, 
-                 noise_levels=[15, 25, 50], shapes=['lines', 'circles', 'rectangles']):
+                 noise_levels=[15, 25, 50], transform=None):
         self.num_samples = num_samples
         self.patch_size = patch_size
         self.noise_levels = noise_levels
-        self.shapes = shapes
-        
-        self.transform = A.Compose([
-            A.Normalize(mean=[0.5], std=[0.5]),
-            ToTensorV2(),
-        ])
-    
-    def generate_clean_image(self):
-        """Генерация чистого изображения с геометрическими фигурами"""
-        img = np.zeros((self.patch_size, self.patch_size), dtype=np.float32)
-        
-        # Генерируем случайные фигуры
-        num_shapes = random.randint(3, 8)
-        
-        for _ in range(num_shapes):
-            shape_type = random.choice(self.shapes)
-            
-            if shape_type == 'lines':
-                # Линии
-                thickness = random.randint(1, 3)
-                pt1 = (random.randint(0, self.patch_size), 
-                       random.randint(0, self.patch_size))
-                pt2 = (random.randint(0, self.patch_size), 
-                       random.randint(0, self.patch_size))
-                cv2.line(img, pt1, pt2, 1.0, thickness)
-            
-            elif shape_type == 'circles':
-                # Круги
-                radius = random.randint(5, 20)
-                center = (random.randint(radius, self.patch_size - radius),
-                          random.randint(radius, self.patch_size - radius))
-                thickness = random.choice([-1, 1, 2])
-                cv2.circle(img, center, radius, 1.0, thickness)
-            
-            elif shape_type == 'rectangles':
-                # Прямоугольники
-                pt1 = (random.randint(0, self.patch_size - 20),
-                       random.randint(0, self.patch_size - 20))
-                pt2 = (pt1[0] + random.randint(10, 40),
-                       pt1[1] + random.randint(10, 40))
-                thickness = random.choice([-1, 1, 2])
-                cv2.rectangle(img, pt1, pt2, 1.0, thickness)
-        
-        return img
+        self.transform = transform
     
     def __len__(self):
         return self.num_samples
     
     def __getitem__(self, idx):
-        # Генерируем чистое изображение
-        clean = self.generate_clean_image()
+        # Генерация чистого изображения
+        clean_img = self.generate_clean_image()
         
-        # Маска = бинаризованное чистое изображение
-        mask = (clean > 0).astype(np.float32)
+        # Генерация маски
+        mask_img = self.generate_mask(clean_img)
         
-        # Добавляем шум
-        noise_level = random.choice(self.noise_levels) / 255.0
-        noise = np.random.normal(0, noise_level, clean.shape)
-        noisy = np.clip(clean + noise, 0, 1)
+        # Добавление шума
+        noise_level = random.choice(self.noise_levels)
+        noisy_img = self.add_noise(clean_img, noise_level)
         
-        # Конвертация в 3 канала
-        noisy_3ch = np.stack([noisy * 255] * 3, axis=-1)
-        clean_3ch = np.stack([clean * 255] * 3, axis=-1)
-        mask_3ch = np.stack([mask * 255] * 3, axis=-1)
-        
-        # Применяем преобразования
-        transformed = self.transform(image=noisy_3ch, 
-                                     clean=clean_3ch,
-                                     mask=mask_3ch)
-        
-        noisy_tensor = transformed['image'][0:1, :, :]
-        clean_tensor = transformed['clean'][0:1, :, :]
-        mask_tensor = transformed['mask'][0:1, :, :]
+        # Конвертация в тензоры
+        clean_tensor = self.image_to_tensor(clean_img)
+        noisy_tensor = self.image_to_tensor(noisy_img)
+        mask_tensor = self.mask_to_tensor(mask_img)
         
         return {
-            'noisy': noisy_tensor,
             'clean': clean_tensor,
+            'noisy': noisy_tensor,
             'mask': mask_tensor,
-            'filename': f'synthetic_{idx}.png'
+            'filename': f'synthetic_{idx:06d}'
         }
-
-
-if __name__ == "__main__":
-    # Тестирование датасета
-    import matplotlib.pyplot as plt
     
-    dataset = DenoiseMaskDataset('data', mode='train', patch_size=128)
+    def generate_clean_image(self):
+        """Генерация чистого изображения с геометрическими фигурами"""
+        img = np.zeros((self.patch_size, self.patch_size), dtype=np.uint8)
+        
+        # Случайное количество фигур
+        num_shapes = random.randint(3, 8)
+        
+        for _ in range(num_shapes):
+            shape_type = random.choice(['line', 'circle', 'rectangle', 'polygon'])
+            
+            if shape_type == 'line':
+                pt1 = (random.randint(0, self.patch_size), 
+                       random.randint(0, self.patch_size))
+                pt2 = (random.randint(0, self.patch_size), 
+                       random.randint(0, self.patch_size))
+                thickness = random.randint(1, 3)
+                cv2.line(img, pt1, pt2, 255, thickness)
+            
+            elif shape_type == 'circle':
+                radius = random.randint(5, 20)
+                center = (random.randint(radius, self.patch_size - radius),
+                         random.randint(radius, self.patch_size - radius))
+                thickness = random.choice([-1, 1, 2])
+                cv2.circle(img, center, radius, 255, thickness)
+            
+            elif shape_type == 'rectangle':
+                pt1 = (random.randint(0, self.patch_size - 40),
+                      random.randint(0, self.patch_size - 40))
+                pt2 = (pt1[0] + random.randint(20, 40),
+                      pt1[1] + random.randint(20, 40))
+                thickness = random.choice([-1, 1, 2])
+                cv2.rectangle(img, pt1, pt2, 255, thickness)
+            
+            elif shape_type == 'polygon':
+                num_vertices = random.randint(3, 6)
+                vertices = []
+                for _ in range(num_vertices):
+                    vertices.append([random.randint(0, self.patch_size), 
+                                   random.randint(0, self.patch_size)])
+                pts = np.array([vertices], dtype=np.int32)
+                thickness = random.choice([-1, 1])
+                cv2.fillPoly(img, pts, 255)
+        
+        return img
     
-    if len(dataset) > 0:
-        sample = dataset[0]
-        
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-        
-        # Денормализация для отображения
-        noisy_img = (sample['noisy'].numpy().squeeze() * 0.5 + 0.5)
-        clean_img = (sample['clean'].numpy().squeeze() * 0.5 + 0.5)
-        mask_img = sample['mask'].numpy().squeeze()
-        
-        axes[0].imshow(noisy_img, cmap='gray')
-        axes[0].set_title('Noisy')
-        axes[0].axis('off')
-        
-        axes[1].imshow(clean_img, cmap='gray')
-        axes[1].set_title('Clean')
-        axes[1].axis('off')
-        
-        axes[2].imshow(mask_img, cmap='gray')
-        axes[2].set_title('Mask')
-        axes[2].axis('off')
-        
-        plt.tight_layout()
-        plt.show()
-        
-        print(f"Noisy shape: {sample['noisy'].shape}")
-        print(f"Clean shape: {sample['clean'].shape}")
-        print(f"Mask shape: {sample['mask'].shape}")
-        print(f"Mask range: [{mask_img.min():.3f}, {mask_img.max():.3f}]")
-    else:
-        print("No data found. Creating synthetic dataset...")
-        syn_dataset = SyntheticNoiseMaskDataset(num_samples=10)
-        sample = syn_dataset[0]
-        print(f"Synthetic sample shapes: {sample['noisy'].shape}, {sample['clean'].shape}, {sample['mask'].shape}")
+    def generate_mask(self, clean_img):
+        """Генерация маски на основе чистого изображения"""
+        # Простая бинаризация
+        _, mask = cv2.threshold(clean_img, 127, 255, cv2.THRESH_BINARY)
+        return mask
+    
+    def add_noise(self, image, noise_level):
+        """Добавление гауссовского шума"""
+        noise = np.random.normal(0, noise_level, image.shape)
+        noisy = image.astype(np.float32) + noise
+        noisy = np.clip(noisy, 0, 255).astype(np.uint8)
+        return noisy
+    
+    def image_to_tensor(self, img):
+        """Конвертация изображения в тензор"""
+        img_tensor = torch.from_numpy(img.astype(np.float32) / 255.0)
+        img_tensor = img_tensor * 2 - 1  # [-1, 1]
+        img_tensor = img_tensor.unsqueeze(0)
+        return img_tensor
+    
+    def mask_to_tensor(self, mask):
+        """Конвертация маски в тензор"""
+        mask_tensor = torch.from_numpy(mask.astype(np.float32) / 255.0)
+        mask_tensor = mask_tensor.unsqueeze(0)
+        return mask_tensor

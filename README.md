@@ -16,12 +16,12 @@ python prepare_data.py prepare --input path/to/clean/images --output data
 # 2. Обучение модели
  Обучение на синтетических данных
 ```bash
-python train.py --synthetic --epochs 50 --batch_size 16
+python train.py --synthetic --epochs 50 --batch_size 16 --num_workers 0
 ```
 
  Обучение на реальных данных
 ```bash
-python train.py --data_dir data --epochs 50 --batch_size 16
+python train.py --data_dir data --epochs 50 --batch_size 16 --num_workers 0
 ```
 
 # 3. Денойзинг изображений

@@ -372,8 +372,7 @@ def main(args):
         optimizer,
         mode='min',
         factor=0.5,
-        patience=args.patience,
-        verbose=True
+        patience=args.patience
     )
     
     # TensorBoard

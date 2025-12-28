@@ -38,7 +38,8 @@ venv.bak/
 .DS_Store
 
 # Project specific
-data/                    # Исходные данные (не коммитить)
+data/                # Исходные данные (не коммитить)
+*.png
 checkpoints/             # Веса моделей (большие файлы)
 logs/                    # Логи TensorBoard
 visualizations/         # Визуализации результатов
