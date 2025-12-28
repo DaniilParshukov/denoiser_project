@@ -40,6 +40,7 @@ venv.bak/
 # Project specific
 data/                # Исходные данные (не коммитить)
 *.png
+*.jpg
 checkpoints/             # Веса моделей (большие файлы)
 logs/                    # Логи TensorBoard
 visualizations/         # Визуализации результатов
